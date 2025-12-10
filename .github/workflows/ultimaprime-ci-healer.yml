@@ -1,0 +1,111 @@
+name: ULTIMA-PRIME CI Healer
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_diagnostics:
+        description: 'Run CI diagnostics'
+        required: false
+        default: 'true'
+  issue_comment:
+    types: [created]
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'workflow_dispatch' || 
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@ultima-prime scan'))
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install test dependencies
+        run: |
+          pip install pytest pytest-cov
+          if [ -f requirements-dev.txt ]; then
+            pip install -r requirements-dev.txt
+          fi
+      
+      - name: Run ULTIMA-PRIME diagnostics (dry-run)
+        id: scan
+        run: |
+          python tools/ultimaprime/scan_ci.py --run-pytest || true
+          echo "diagnostic_complete=true" >> $GITHUB_OUTPUT
+        continue-on-error: true
+      
+      - name: Generate Optional import patches
+        id: optional_patch
+        run: |
+          python tools/ultimaprime/fix_optional_imports.py || true
+          echo "optional_patches_generated=true" >> $GITHUB_OUTPUT
+        continue-on-error: true
+      
+      - name: Generate dependency patches
+        id: dep_patch
+        run: |
+          python tools/ultimaprime/add_dependency_patch.py || true
+          echo "dependency_patches_generated=true" >> $GITHUB_OUTPUT
+        continue-on-error: true
+      
+      - name: Upload diagnostics artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ultima-diagnostics-${{ github.run_id }}
+          path: diagnostics/
+          if-no-files-found: ignore
+      
+      - name: Upload patches artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ultima-patches-${{ github.run_id }}
+          path: tools/ultimaprime/patches/
+          if-no-files-found: ignore
+      
+      - name: Create summary
+        if: always()
+        run: |
+          echo "## 🖥️ ULTIMA-PRIME Diagnostic Report" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ **Diagnostics:** Completed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ -f diagnostics/report.json ]; then
+            echo "**Issues Found:**" >> $GITHUB_STEP_SUMMARY
+            cat diagnostics/report.txt | head -20 >> $GITHUB_STEP_SUMMARY || true
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Artifacts:**" >> $GITHUB_STEP_SUMMARY
+          echo "- Diagnostics: [Download](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Next steps:**" >> $GITHUB_STEP_SUMMARY
+          echo "1. Review artifacts above" >> $GITHUB_STEP_SUMMARY
+          echo "2. Run locally: \`bash tools/ultimaprime/generate_pr_patch.sh\`" >> $GITHUB_STEP_SUMMARY
+          echo "3. Create draft PR with \`gh pr create --draft\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "⚠️ **POLICY: Draft-only, no auto-merge**" >> $GITHUB_STEP_SUMMARY
+  
+  notify:
+    runs-on: ubuntu-latest
+    needs: diagnose
+    if: github.event_name == 'issue_comment'
+    steps:
+      - name: Post comment with results
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '### 🤖 ULTIMA-PRIME Response\n\n✅ Diagnostics scan completed!\n\nCheck workflow artifacts for detailed report.\n\n**Policy:** All patches are draft-only. Manual review required before merge.'
+            })
